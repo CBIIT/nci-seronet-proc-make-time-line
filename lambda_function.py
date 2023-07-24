@@ -21,7 +21,6 @@ def lambda_handler(event, context):
     error_msg.clear()
     success_msg.clear()
     ssm = boto3.client("ssm")
-    http = urllib3.PoolManager()
     host_client = ssm.get_parameter(Name="db_host", WithDecryption=True).get("Parameter").get("Value")
     user_name = ssm.get_parameter(Name="lambda_db_username", WithDecryption=True).get("Parameter").get("Value")
     user_password =ssm.get_parameter(Name="lambda_db_password", WithDecryption=True).get("Parameter").get("Value")
@@ -42,7 +41,6 @@ def lambda_handler(event, context):
         for success_message in success_msg:
             message_slack_success = message_slack_success + '\n'+ success_message
         write_to_slack(message_slack_success, success)
-    conn.connection.commit()
     return {
         'statusCode': 200,
         'body': json.dumps('Hello from Lambda!')
@@ -116,8 +114,8 @@ def update_participant_info(connection_tuple):
         new_data.to_sql(name="Visit_One_Offset_Correction", con=engine, if_exists="append", index=False)
     except Exception as e:
         display_error_line(e)
-    #finally:
-        #conn.connection.commit()
+    finally:
+        conn.connection.commit()
     for curr_part in update_data.index:
         try:
             sql_qry = (f"update Visit_One_Offset_Correction set Offset_Value = '{update_data.loc[curr_part, 'Offset_Value']}' " +
@@ -125,8 +123,8 @@ def update_participant_info(connection_tuple):
             conn.execute(sql_qry)
         except Exception as e:
             display_error_line(e)
-        #finally:
-            #conn.connection.commit()
+        finally:
+            conn.connection.commit()
 
 #########  Update the "Sunday_Prior_To_First_Visits" feild using accrual reports ###################
     accrual_data = pd.read_sql(("SELECT Research_Participant_ID, Sunday_Prior_To_Visit_1 FROM Accrual_Participant_Info;"), conn)
@@ -142,8 +140,8 @@ def update_participant_info(connection_tuple):
             conn.execute(sql_qry)
         except Exception as e:
             display_error_line(e)
-        #finally:
-            #conn.connection.commit()
+        finally:
+            conn.connection.commit()
 #########  Update the Primary Cohort feild using accrual reports ###################
     accrual_data = pd.read_sql(("SELECT Research_Participant_ID, Visit_Number, Site_Cohort_Name, Primary_Cohort FROM Accrual_Visit_Info;"), conn)
     visit_data = pd.read_sql(("SELECT Visit_Info_ID, Primary_Study_Cohort, CBC_Classification FROM Participant_Visit_Info;"), conn)
@@ -162,8 +160,8 @@ def update_participant_info(connection_tuple):
             conn.execute(sql_qry)
         except Exception as e:
             display_error_line(e)
-        #finally:
-            #conn.connection.commit()
+        finally:
+            conn.connection.commit()
 
     ### sets version number of all visits ##
     version_num = pd.read_sql(("select * from  `seronetdb-Vaccine_Response`.Participant_Visit_Info as v " +
@@ -177,8 +175,8 @@ def update_participant_info(connection_tuple):
             conn.execute(sql_query)
         except Exception as e:
             display_error_line(e)
-        #finally:
-            #conn.connection.commit()
+        finally:
+            conn.connection.commit()
 
 
 
@@ -233,10 +231,10 @@ def make_time_line(connection_tuple):
     all_sample = pd.DataFrame(columns = ['Research_Participant_ID', 'Normalized_Visit_Index', 'Serum_Volume_For_FNL', 'Submitted_Serum_Volume',
                                'Serum_Volume_Received', 'Num_PBMC_Vials_For_FNL', 'Submitted_PBMC_Vials', 'PBMC_Vials_Received'])
 
-    submit_visit = pd.read_sql(("SELECT v.Visit_Info_ID, v.Research_Participant_ID, v.Visit_Number as 'Submitted_Visit_Num', Primary_Study_Cohort, " + 
+    submit_visit = pd.read_sql(("SELECT v.Visit_Info_ID, v.Research_Participant_ID, v.Visit_Number as 'Submitted_Visit_Num', Primary_Study_Cohort, " +
                                "v.Visit_Date_Duration_From_Index - o.Offset_Value as 'Duration_From_Baseline', p.Sunday_Prior_To_First_Visit " +
                                "FROM `seronetdb-Vaccine_Response`.Participant_Visit_Info as v join Visit_One_Offset_Correction as o " +
-                               "on v.Research_Participant_ID = o.Research_Participant_ID " + 
+                               "on v.Research_Participant_ID = o.Research_Participant_ID " +
                                "join `seronetdb-Vaccine_Response`.Participant as p on v.Research_Participant_ID = p.Research_Participant_ID"), conn)
 
     submit_vacc = pd.read_sql(("SELECT c.Research_Participant_ID, c.`SARS-CoV-2_Vaccine_Type`, c.Vaccination_Status, " +
@@ -267,7 +265,7 @@ def make_time_line(connection_tuple):
                                                                        "else 0 end), 1)  as 'Submitted_Serum_Volume', " +
                                "round(sum(case when bp.`Material Type` is NULL then 0  when bp.`Material Type` = 'SERUM' and `Vial Status` not in ('Empty') then bp.Volume " +
                                               "when bp.`Material Type` = 'SERUM' and `Vial Status` in ('Empty')  then ali.Aliquot_Volume else 0 end), 1) as 'Serum_Volume_Received', " +
-                                      
+
                               "sum(case when b.Biospecimen_Type = 'Serum' and  ali.Aliquot_Comments in ('Aliquot does not exist; mistakenly included in initial file', " +
                               "'Aliquot was unable to be located.', 'Previously submitted in error', 'Serum aliquots were not collected and cannot be shipped.', " +
                               "'Expiration date not recorded, lot number not recorded; Sample unavailable, used in local experiments', " +
@@ -296,8 +294,9 @@ def make_time_line(connection_tuple):
                               "on o.Research_Participant_ID = left(ch.Visit_Info_ID,9)"), conn)
 
     uni_part = list(set(accrual_visit["Research_Participant_ID"].tolist() + submit_visit["Research_Participant_ID"].tolist()))
-
+    #uni_part = ["32_441084"]
     error_list = []
+    error_uni = []
     for curr_part in uni_part:
         #if curr_part == '41_100001':
         #    print("x")
@@ -349,7 +348,8 @@ def make_time_line(connection_tuple):
             curr_visit["Duration_Between_Vaccine_and_Visit"] = 0
             curr_visit['Normalized_Visit_Index'] = 0
             curr_visit['Visit_Sample_Index'] = np.nan
-        curr_visit = combine_visit_and_vacc(curr_visit)
+
+        curr_visit, error_uni = combine_visit_and_vacc(curr_visit, error_uni, curr_part)
 
         curr_visit["Covid_Test_Result"] = "No Test Reported"
         curr_visit["Test_Duration_Since_Vaccine"] = "N/A"
@@ -358,7 +358,7 @@ def make_time_line(connection_tuple):
         if len(y) > 0:
             curr_visit = add_covid_test(curr_visit, curr_vacc, y)
         acc_visit = clean_up_visit(acc_visit, acc_vacc)
-        acc_visit = combine_visit_and_vacc(acc_visit)
+        acc_visit, error_uni = combine_visit_and_vacc(acc_visit, error_uni, curr_part)
 
 
         try:
@@ -430,7 +430,8 @@ def make_time_line(connection_tuple):
             #error_list.append(curr_part)
 
     error_list = list(set(error_list))
-    print(error_list)
+    print("The research participant ids that both Sunday_Prior_To_First_Visit in the Participant table is null and Sunday_Prior_To_Visit_1 in the Accrual_Participant_Info table is null at the same time: ",error_list)
+    print("The research participant ids that do not have data in table Accrual_visit_info:",error_uni)
 
     try:
         all_vacc.reset_index(inplace=True, drop=True)
@@ -503,9 +504,9 @@ def display_error_line(ex):
     print(str({'type': type(ex).__name__, 'message': str(ex), 'trace': trace}))
 
 
-def combine_visit_and_vacc(df):
+def combine_visit_and_vacc(df, error_uni, current_uni):
     if len(df) == 0:
-        return df
+        return df, error_uni
     try:
         last_visit = int(np.nanmax(df["Normalized_Visit_Index"]))
         for visit_num in list(range(1, last_visit+1)):
@@ -516,8 +517,10 @@ def combine_visit_and_vacc(df):
             df = get_vaccine_data(df, visit_index, last_visit)
         df = df.query("Normalized_Visit_Index > 0")
     except Exception as e:
-        print(e)
-    return df
+        error_uni.append(current_uni)
+        print(current_uni)
+        #print(e)
+    return df, error_uni
 
 
 def add_covid_test(df, curr_vacc, y):
@@ -559,7 +562,7 @@ def get_vaccine_data(curr_sample, visit_index, last_visit):
                 if curr_sample["Normalized_Visit_Index"][test_val] > 0:
                     continue
                 elif curr_sample.loc[test_val]["Vaccination_Status"] ==  'No vaccination event reported':
-                    continue 
+                    continue
                 else:
                     curr_sample["Vaccination_Status"][test_val+offset] = curr_sample.loc[test_val]["Vaccination_Status"]
                     if curr_sample.loc[test_val]["Vaccination_Status"] == "Unvaccinated":
@@ -586,7 +589,6 @@ def add_data_to_tables(df, prev_df, primary_key, table_name, conn, engine):
     #    df["Breakthrough_To_Visit_Duration"].fillna(-10000, inplace=True)
     #    df['Duration_Between_Vaccine_and_Visit'].fillna(-10000, inplace=True)
     df.fillna("-10000", inplace=True)
-    
     #if "Breakthrough_To_Visit_Duration" in prev_df.columns:
     #    prev_df["Breakthrough_To_Visit_Duration"].fillna(-10000, inplace=True)
     #    prev_df['Duration_Between_Vaccine_and_Visit'].fillna(-10000, inplace=True)
@@ -652,7 +654,7 @@ def add_data_to_tables(df, prev_df, primary_key, table_name, conn, engine):
 
 def delete_data_files(bucket_name, file_key):
     global success_msg
-    s3_resource = boto3.resource('s3') 
+    s3_resource = boto3.resource('s3')
     bucket = s3_resource.Bucket(bucket_name)
     if 'Vaccine+Response+Submissions' in file_key or 'Reference+Panel+Submissions' in file_key:
         subfolders = file_key.split('/')
@@ -699,8 +701,8 @@ def update_tables(conn, engine, primary_keys, update_table, sql_table):
         except Exception as e:
             error_msg.append(str(e))
             display_error_line(e)
-        #finally:
-            #conn.connection.commit()
+        finally:
+            conn.connection.commit()
 
 def write_to_slack(message_slack, slack_chanel):
     http = urllib3.PoolManager()
