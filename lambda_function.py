@@ -193,6 +193,7 @@ def make_time_line(connection_tuple):
 
     x = pd.read_sql(("SELECT Sunday_Prior_To_First_Visit FROM `seronetdb-Vaccine_Response`.Participant;"), conn)
     success_msg.append("## Updating vaccine response timeline ##")
+    error_msg.append("## Updating vaccine response timeline ##")
 
     bio_data = pd.read_sql("Select Visit_Info_ID, Research_Participant_ID, Biospecimen_ID, Biospecimen_Type, " +
                        "Biospecimen_Collection_Date_Duration_From_Index, Biospecimen_Comments " +
@@ -230,10 +231,10 @@ def make_time_line(connection_tuple):
     all_sample = pd.DataFrame(columns = ['Research_Participant_ID', 'Normalized_Visit_Index', 'Serum_Volume_For_FNL', 'Submitted_Serum_Volume',
                                'Serum_Volume_Received', 'Num_PBMC_Vials_For_FNL', 'Submitted_PBMC_Vials', 'PBMC_Vials_Received'])
 
-    submit_visit = pd.read_sql(("SELECT v.Visit_Info_ID, v.Research_Participant_ID, v.Visit_Number as 'Submitted_Visit_Num', Primary_Study_Cohort, " + 
+    submit_visit = pd.read_sql(("SELECT v.Visit_Info_ID, v.Research_Participant_ID, v.Visit_Number as 'Submitted_Visit_Num', Primary_Study_Cohort, " +
                                "v.Visit_Date_Duration_From_Index - o.Offset_Value as 'Duration_From_Baseline', p.Sunday_Prior_To_First_Visit " +
                                "FROM `seronetdb-Vaccine_Response`.Participant_Visit_Info as v join Visit_One_Offset_Correction as o " +
-                               "on v.Research_Participant_ID = o.Research_Participant_ID " + 
+                               "on v.Research_Participant_ID = o.Research_Participant_ID " +
                                "join `seronetdb-Vaccine_Response`.Participant as p on v.Research_Participant_ID = p.Research_Participant_ID"), conn)
 
     submit_vacc = pd.read_sql(("SELECT c.Research_Participant_ID, c.`SARS-CoV-2_Vaccine_Type`, c.Vaccination_Status, " +
@@ -561,7 +562,7 @@ def get_vaccine_data(curr_sample, visit_index, last_visit):
                 if curr_sample["Normalized_Visit_Index"][test_val] > 0:
                     continue
                 elif curr_sample.loc[test_val]["Vaccination_Status"] ==  'No vaccination event reported':
-                    continue 
+                    continue
                 else:
                     curr_sample["Vaccination_Status"][test_val+offset] = curr_sample.loc[test_val]["Vaccination_Status"]
                     if curr_sample.loc[test_val]["Vaccination_Status"] == "Unvaccinated":
@@ -653,7 +654,7 @@ def add_data_to_tables(df, prev_df, primary_key, table_name, conn, engine):
 
 def delete_data_files(bucket_name, file_key):
     global success_msg
-    s3_resource = boto3.resource('s3') 
+    s3_resource = boto3.resource('s3')
     bucket = s3_resource.Bucket(bucket_name)
     if 'Vaccine+Response+Submissions' in file_key or 'Reference+Panel+Submissions' in file_key:
         subfolders = file_key.split('/')
