@@ -21,6 +21,7 @@ def lambda_handler(event, context):
     error_msg.clear()
     success_msg.clear()
     ssm = boto3.client("ssm")
+    http = urllib3.PoolManager()
     host_client = ssm.get_parameter(Name="db_host", WithDecryption=True).get("Parameter").get("Value")
     user_name = ssm.get_parameter(Name="lambda_db_username", WithDecryption=True).get("Parameter").get("Value")
     user_password =ssm.get_parameter(Name="lambda_db_password", WithDecryption=True).get("Parameter").get("Value")
@@ -41,6 +42,7 @@ def lambda_handler(event, context):
         for success_message in success_msg:
             message_slack_success = message_slack_success + '\n'+ success_message
         write_to_slack(message_slack_success, success)
+    #conn.connection.commit()
     return {
         'statusCode': 200,
         'body': json.dumps('Hello from Lambda!')
@@ -99,28 +101,36 @@ def update_participant_info(connection_tuple):
     engine = connection_tuple[1]
 #########  Update the first visit offset correction table for new participants ###################
     offset_data = pd.read_sql(("SELECT * FROM `seronetdb-Vaccine_Response`.Visit_One_Offset_Correction;"), conn)
-    visit_data = pd.read_sql(("SELECT Research_Participant_ID, Visit_Date_Duration_From_Index FROM `seronetdb-Vaccine_Response`.Participant_Visit_Info " +
-                              "where Type_Of_Visit = 'Baseline' and Visit_Number = '1';"), conn)
 
+    visit_data = pd.read_sql(("SELECT Research_Participant_ID, Visit_Date_Duration_From_Index FROM `seronetdb-Vaccine_Response`.Participant_Visit_Info"), conn)
+    visit_data.sort_values(['Research_Participant_ID', 'Visit_Date_Duration_From_Index'], inplace=True)
+    visit_data.drop_duplicates("Research_Participant_ID", keep="first", inplace=True)   #get first visit (lowest duration from index)
+    
     merged_data = visit_data.merge(offset_data, left_on=visit_data.columns.tolist(), right_on=offset_data.columns.tolist(), how="left", indicator=True)
     new_data = merged_data.query("_merge not in ['both']")
     new_data = new_data.drop(["Offset_Value", "_merge"], axis=1)
     new_data = new_data.rename(columns={"Visit_Date_Duration_From_Index":"Offset_Value"})
-
+    
     check_data = new_data.merge(offset_data["Research_Participant_ID"], how="left", indicator=True)
     new_data = check_data.query("_merge not in ['both']").drop("_merge", axis=1)
     update_data = check_data.query("_merge in ['both']").drop("_merge", axis=1)
+    
+    if len(new_data) == 0:
+        print("there are no new particicpants to add to Visit_One_Offset_Correction")
+    else:
+        print(f"Adding {len(new_data)} particicpants to to Visit_One_Offset_Correction")
     try:
         new_data.to_sql(name="Visit_One_Offset_Correction", con=engine, if_exists="append", index=False)
     except Exception as e:
         display_error_line(e)
     finally:
         conn.connection.commit()
+        
     for curr_part in update_data.index:
         try:
             sql_qry = (f"update Visit_One_Offset_Correction set Offset_Value = '{update_data.loc[curr_part, 'Offset_Value']}' " +
                        f"where Research_Participant_ID = '{update_data.loc[curr_part, 'Research_Participant_ID']}'")
-            conn.execute(sql_qry)
+            engine.execute(sql_qry)
         except Exception as e:
             display_error_line(e)
         finally:
@@ -133,50 +143,44 @@ def update_participant_info(connection_tuple):
     merged_data = part_data.merge(accrual_data, on="Research_Participant_ID", how="left", indicator=True)
     check_data = merged_data.query("_merge in ['both']")
     check_data = check_data.query("Sunday_Prior_To_First_Visit !=Sunday_Prior_To_Visit_1")
+
     for curr_part in check_data.index:
         try:
             sql_qry = (f"update Participant set Sunday_Prior_To_First_Visit = '{check_data.loc[curr_part, 'Sunday_Prior_To_Visit_1']}' " +
                        f"where Research_Participant_ID = '{check_data.loc[curr_part, 'Research_Participant_ID']}'")
-            conn.execute(sql_qry)
+            engine.execute(sql_qry)
         except Exception as e:
             display_error_line(e)
         finally:
             conn.connection.commit()
 #########  Update the Primary Cohort feild using accrual reports ###################
-    accrual_data = pd.read_sql(("SELECT Research_Participant_ID, Visit_Number, Site_Cohort_Name, Primary_Cohort FROM Accrual_Visit_Info;"), conn)
-    visit_data = pd.read_sql(("SELECT Visit_Info_ID, Primary_Study_Cohort, CBC_Classification FROM Participant_Visit_Info;"), conn)
-    accrual_data["New_Visit_Info_ID"] = (accrual_data["Research_Participant_ID"] + " : V" + ["%02d" % (int(i),) for i in accrual_data['Visit_Number']])
-    x = visit_data["Visit_Info_ID"].str.replace(": B", ": V")
-    visit_data["New_Visit_Info_ID"] = x.str.replace(": F", ": V")
-    x = visit_data.merge(accrual_data, how="left", on= "New_Visit_Info_ID")
+    #accrual_data = pd.read_sql(("SELECT Research_Participant_ID, Visit_Number, Site_Cohort_Name, Primary_Cohort FROM Accrual_Visit_Info;"), conn)
+    accrual_data = pd.read_sql(("SELECT distinct Research_Participant_ID, Site_Cohort_Name, Primary_Cohort FROM Accrual_Visit_Info;"), conn)
+
+    #visit_data = pd.read_sql(("SELECT Visit_Info_ID, Primary_Study_Cohort, CBC_Classification FROM Participant_Visit_Info;"), conn)
+    visit_data = pd.read_sql(("SELECT Research_Participant_ID, Visit_Info_ID, Primary_Study_Cohort, CBC_Classification FROM Participant_Visit_Info;"), conn)
+    #accrual_data["New_Visit_Info_ID"] = (accrual_data["Research_Participant_ID"] + " : V" + ["%02d" % (int(i),) for i in accrual_data['Visit_Number']])
+    #x = visit_data["Visit_Info_ID"].str.replace(": B", ": V")
+    #visit_data["New_Visit_Info_ID"] = x.str.replace(": F", ": V")
+    #x = visit_data.merge(accrual_data, how="left", on= "New_Visit_Info_ID")
+    x = visit_data.merge(accrual_data, how="left", on="Research_Participant_ID")
+    
     x.fillna("No Data", inplace=True)
-    y = x.query("Primary_Study_Cohort != Primary_Cohort or CBC_Classification != Site_Cohort_Name")
+    #y = x.query("Primary_Study_Cohort != Primary_Cohort or CBC_Classification != Site_Cohort_Name")
+    y = x.query("Primary_Study_Cohort != Primary_Cohort")
+
     y = y.query("Primary_Cohort not in ['No Data']")  #no accrual data to update
     for curr_part in y.index:
         try:
             sql_qry = (f"update Participant_Visit_Info set CBC_Classification = '{y.loc[curr_part, 'Site_Cohort_Name']}', " +
                        f"Primary_Study_Cohort = '{y.loc[curr_part, 'Primary_Cohort']}' " +
                        f"where Visit_Info_ID = '{y.loc[curr_part, 'Visit_Info_ID']}'")
-            conn.execute(sql_qry)
+            engine.execute(sql_qry)
         except Exception as e:
             display_error_line(e)
         finally:
             conn.connection.commit()
 
-    ### sets version number of all visits ##
-    version_num = pd.read_sql(("select * from  `seronetdb-Vaccine_Response`.Participant_Visit_Info as v " +
-                              "join `seronetdb-Vaccine_Response`.Participant as p on v.Research_Participant_ID = p.Research_Participant_ID"), conn)
-
-    version_num = version_num.query("Submission_Index == 76")
-    for index in version_num.index:
-        try:
-            visit_id = version_num["Visit_Info_ID"][index]
-            sql_query = f"Update Participant_Visit_Info set Data_Release_Version = '3.0.0' where Visit_Info_ID = '{visit_id }'"
-            conn.execute(sql_query)
-        except Exception as e:
-            display_error_line(e)
-        finally:
-            conn.connection.commit()
 
 
 
@@ -231,10 +235,10 @@ def make_time_line(connection_tuple):
     all_sample = pd.DataFrame(columns = ['Research_Participant_ID', 'Normalized_Visit_Index', 'Serum_Volume_For_FNL', 'Submitted_Serum_Volume',
                                'Serum_Volume_Received', 'Num_PBMC_Vials_For_FNL', 'Submitted_PBMC_Vials', 'PBMC_Vials_Received'])
 
-    submit_visit = pd.read_sql(("SELECT v.Visit_Info_ID, v.Research_Participant_ID, v.Visit_Number as 'Submitted_Visit_Num', Primary_Study_Cohort, " +
+    submit_visit = pd.read_sql(("SELECT v.Visit_Info_ID, v.Research_Participant_ID, v.Visit_Number as 'Submitted_Visit_Num', Primary_Study_Cohort, " + 
                                "v.Visit_Date_Duration_From_Index - o.Offset_Value as 'Duration_From_Baseline', p.Sunday_Prior_To_First_Visit " +
                                "FROM `seronetdb-Vaccine_Response`.Participant_Visit_Info as v join Visit_One_Offset_Correction as o " +
-                               "on v.Research_Participant_ID = o.Research_Participant_ID " +
+                               "on v.Research_Participant_ID = o.Research_Participant_ID " + 
                                "join `seronetdb-Vaccine_Response`.Participant as p on v.Research_Participant_ID = p.Research_Participant_ID"), conn)
 
     submit_vacc = pd.read_sql(("SELECT c.Research_Participant_ID, c.`SARS-CoV-2_Vaccine_Type`, c.Vaccination_Status, " +
@@ -265,7 +269,7 @@ def make_time_line(connection_tuple):
                                                                        "else 0 end), 1)  as 'Submitted_Serum_Volume', " +
                                "round(sum(case when bp.`Material Type` is NULL then 0  when bp.`Material Type` = 'SERUM' and `Vial Status` not in ('Empty') then bp.Volume " +
                                               "when bp.`Material Type` = 'SERUM' and `Vial Status` in ('Empty')  then ali.Aliquot_Volume else 0 end), 1) as 'Serum_Volume_Received', " +
-
+                                      
                               "sum(case when b.Biospecimen_Type = 'Serum' and  ali.Aliquot_Comments in ('Aliquot does not exist; mistakenly included in initial file', " +
                               "'Aliquot was unable to be located.', 'Previously submitted in error', 'Serum aliquots were not collected and cannot be shipped.', " +
                               "'Expiration date not recorded, lot number not recorded; Sample unavailable, used in local experiments', " +
@@ -294,9 +298,8 @@ def make_time_line(connection_tuple):
                               "on o.Research_Participant_ID = left(ch.Visit_Info_ID,9)"), conn)
 
     uni_part = list(set(accrual_visit["Research_Participant_ID"].tolist() + submit_visit["Research_Participant_ID"].tolist()))
-    #uni_part = ["32_441084"]
+
     error_list = []
-    error_uni = []
     for curr_part in uni_part:
         #if curr_part == '41_100001':
         #    print("x")
@@ -348,8 +351,7 @@ def make_time_line(connection_tuple):
             curr_visit["Duration_Between_Vaccine_and_Visit"] = 0
             curr_visit['Normalized_Visit_Index'] = 0
             curr_visit['Visit_Sample_Index'] = np.nan
-
-        curr_visit, error_uni = combine_visit_and_vacc(curr_visit, error_uni, curr_part)
+        curr_visit = combine_visit_and_vacc(curr_visit)
 
         curr_visit["Covid_Test_Result"] = "No Test Reported"
         curr_visit["Test_Duration_Since_Vaccine"] = "N/A"
@@ -358,7 +360,7 @@ def make_time_line(connection_tuple):
         if len(y) > 0:
             curr_visit = add_covid_test(curr_visit, curr_vacc, y)
         acc_visit = clean_up_visit(acc_visit, acc_vacc)
-        acc_visit, error_uni = combine_visit_and_vacc(acc_visit, error_uni, curr_part)
+        acc_visit = combine_visit_and_vacc(acc_visit)
 
 
         try:
@@ -430,8 +432,7 @@ def make_time_line(connection_tuple):
             #error_list.append(curr_part)
 
     error_list = list(set(error_list))
-    print("The research participant ids that both Sunday_Prior_To_First_Visit in the Participant table is null and Sunday_Prior_To_Visit_1 in the Accrual_Participant_Info table is null at the same time: ",error_list)
-    print("The research participant ids that do not have data in table Accrual_visit_info:",error_uni)
+    print(error_list)
 
     try:
         all_vacc.reset_index(inplace=True, drop=True)
@@ -504,9 +505,9 @@ def display_error_line(ex):
     print(str({'type': type(ex).__name__, 'message': str(ex), 'trace': trace}))
 
 
-def combine_visit_and_vacc(df, error_uni, current_uni):
+def combine_visit_and_vacc(df):
     if len(df) == 0:
-        return df, error_uni
+        return df
     try:
         last_visit = int(np.nanmax(df["Normalized_Visit_Index"]))
         for visit_num in list(range(1, last_visit+1)):
@@ -517,10 +518,8 @@ def combine_visit_and_vacc(df, error_uni, current_uni):
             df = get_vaccine_data(df, visit_index, last_visit)
         df = df.query("Normalized_Visit_Index > 0")
     except Exception as e:
-        error_uni.append(current_uni)
-        print(current_uni)
-        #print(e)
-    return df, error_uni
+        print(e)
+    return df
 
 
 def add_covid_test(df, curr_vacc, y):
@@ -562,7 +561,7 @@ def get_vaccine_data(curr_sample, visit_index, last_visit):
                 if curr_sample["Normalized_Visit_Index"][test_val] > 0:
                     continue
                 elif curr_sample.loc[test_val]["Vaccination_Status"] ==  'No vaccination event reported':
-                    continue
+                    continue 
                 else:
                     curr_sample["Vaccination_Status"][test_val+offset] = curr_sample.loc[test_val]["Vaccination_Status"]
                     if curr_sample.loc[test_val]["Vaccination_Status"] == "Unvaccinated":
@@ -589,6 +588,7 @@ def add_data_to_tables(df, prev_df, primary_key, table_name, conn, engine):
     #    df["Breakthrough_To_Visit_Duration"].fillna(-10000, inplace=True)
     #    df['Duration_Between_Vaccine_and_Visit'].fillna(-10000, inplace=True)
     df.fillna("-10000", inplace=True)
+    
     #if "Breakthrough_To_Visit_Duration" in prev_df.columns:
     #    prev_df["Breakthrough_To_Visit_Duration"].fillna(-10000, inplace=True)
     #    prev_df['Duration_Between_Vaccine_and_Visit'].fillna(-10000, inplace=True)
@@ -654,7 +654,7 @@ def add_data_to_tables(df, prev_df, primary_key, table_name, conn, engine):
 
 def delete_data_files(bucket_name, file_key):
     global success_msg
-    s3_resource = boto3.resource('s3')
+    s3_resource = boto3.resource('s3') 
     bucket = s3_resource.Bucket(bucket_name)
     if 'Vaccine+Response+Submissions' in file_key or 'Reference+Panel+Submissions' in file_key:
         subfolders = file_key.split('/')
@@ -701,8 +701,8 @@ def update_tables(conn, engine, primary_keys, update_table, sql_table):
         except Exception as e:
             error_msg.append(str(e))
             display_error_line(e)
-        finally:
-            conn.connection.commit()
+        #finally:
+            #conn.connection.commit()
 
 def write_to_slack(message_slack, slack_chanel):
     http = urllib3.PoolManager()
